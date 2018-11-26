@@ -10,7 +10,7 @@ from multiprocessing import Pool
 
 import tempytron_lib
 reload(tempytron_lib)
-from tempytron_lib import gen_neuron_paras, train_model,gen_spk_data,get_learning_curve_data,make_feature_data,get_gen_error
+from tempytron_lib import gen_neuron_paras, train_model,gen_spk_data,get_mst_learning_curve_data,make_feature_data,get_gen_error,increment_seed
 
 #profiling: 
 #with kernprof.py in directory, place @profile above any functions to be profiled , then run:
@@ -32,16 +32,18 @@ if __name__ == "__main__":
     #train_specs={'neuron_model_is':'sst','labels_are':'binary','learn_from':'labeled_data','learning_rule_is':'Vmax_grad'}
 
     #2016 paper
-    train_specs={'neuron_model_is':'mst','labels_are':'agg','learn_from':'labeled_data','learning_rule_is':'corr_top_p'}
+    #train_specs={'neuron_model_is':'mst','labels_are':'agg','learn_from':'labeled_data','learning_rule_is':'corr_top_p'}
 
     #apply 2016 corr learning method to 2006 sst setting
     #train_specs={'neuron_model_is':'sst','labels_are':'binary','learn_from':'labeled_data','learning_rule_is':'corr_top_p'} 
 
     #Student teacher setting
     #for sst:
+    #train_specs={'neuron_model_is':'sst','labels_are':'binary','learn_from':'teacher','learning_rule_is':'corr_thresh'} 
     #train_specs={'neuron_model_is':'sst','labels_are':'binary','learn_from':'teacher','learning_rule_is':'corr_top_p'} 
-    #for mst:
-    #train_specs={'neuron_model_is':'mst','labels_are':'binary','learn_from':'teacher','learning_rule_is':'corr_top_p'} 
+
+   #for mst:
+    train_specs={'neuron_model_is':'mst','labels_are':'binary','learn_from':'teacher','learning_rule_is':'corr_top_p'} 
     
     run_name='v1_momentum'
     ##############################################000> Run
@@ -103,7 +105,7 @@ if __name__ == "__main__":
             runname='v4_nowarmup'
             #build data using feature labels (=0:distractor,>0:clue; non-distinct labels group features into a single clue)
             fea_labels=np.array([1,2,3,4,5,0,0,0,0,0]) #hard task
-            n_cycles=500#1000
+            n_cycles=100#500#1000
             #fea_labels=np.array([1,0,0,0,0,0,0,0,0,0]) #easier task
             #n_cycles=200
 
@@ -111,10 +113,9 @@ if __name__ == "__main__":
             num_fea=len(fea_labels)
             fea_count_means=count_mean*np.ones(num_fea)  #feature occurence rate is homogeneous across features
             feature_data,seed=make_feature_data(seed,neu_paras,num_fea,fea_count_means,fea_labels)
-            learning_rate=1e-4
             learning_rate=1e-5
-            divfac=5
-            initial_weight_std=2e-2#1./np.sqrt(neu_paras['num_syn'])   
+            divfac=np.inf
+            initial_weight_std=1./np.sqrt(neu_paras['num_syn'])   
 
             batchname='_'.join(train_specs.values())+'_'+runname+'_lr_'+str(int(-np.log10(learning_rate)))+'_cf_'+str(int(count_mean))+'_df_'+str(divfac)
             batchname+='_labels_'+('_'.join(list(fea_labels.astype(str))))+'_' 
@@ -131,39 +132,43 @@ if __name__ == "__main__":
                 
             track_learning=True
             if track_learning:
-                seed=get_learning_curve_data(outpath+batchname,seed,neu_paras)
+                seed=get_mst_learning_curve_data(outpath+batchname,seed,neu_paras)
     
     elif train_specs['learn_from']=='teacher':
-        runname='v1_testmomentum'
+        runname='v2_rankfix'
 
-        if train_specs['labels_are']=='agg':
-            learning_rate=1e-4
+        if train_specs['neuron_model_is']=='mst': 
+            learning_rate=1e-5
             divfac=5
-            n_cycles=500
-            initial_weight_std=1./np.sqrt(neu_paras['num_syn'])            
-        elif train_specs['labels_are']=='binary':
+            n_cycles=2000
+            initial_weight_std=1./np.sqrt(neu_paras['num_syn'])
+            pattern_activity_duration=1000
+            #fea_labels=np.array([1,2,3,4,5,0,0,0,0,0]) #hard task
+            n_cycles=1000#500#1000
+            #fea_labels=np.array([1,0,0,0,0,0,0,0,0,0]) #easier task
+            #n_cycles=200            
+        elif train_specs['neuron_model_is']=='sst':
             neu_paras['tau_mem']=15.
             neu_paras['tau_syn']=neu_paras['tau_mem']/4
             pattern_activity_duration=500
             learning_rate=1e-4/neu_paras['v_norm']
-            divfac=np.Inf
-            n_cycles=100#2000
+            divfac=5.0
+            n_cycles=1000
             initial_weight_std=1e-3
-            
-        batchname='_'.join(train_specs.values())+'_'+run_name+'_lr_'+str(int(-np.log10(learning_rate)))+'_df_'+str(divfac)+'_T_'+str(pattern_activity_duration) \
+           
+        batchname='_'.join(train_specs.values())+'_'+run_name+'_lr_'+str(int(-np.log10(learning_rate)))+'_df_'+str(divfac)+'_T_'+str(pattern_activity_duration)\
                                         +'_nc_'+str(n_cycles)+'_'
         seed=0
-        learn=False
+        learn=True
         if learn:
             n_trials=1
 
             for trial in range(n_trials):
                 st=time.time()
-                seed+=1
-                np.random.seed(seed) 
+                seed=increment_seed(seed)
                 st=time.time()
                 cur_weights_list,desired_numspkslist,numspkslist,seed,teacher_weights=train_model(\
-                                            neu_paras,train_specs,initial_weight_std,n_cycles,learning_rate,seed,divfac=divfac)
+                                            neu_paras,train_specs,initial_weight_std,n_cycles,learning_rate,seed,pattern_activity_duration=pattern_activity_duration,divfac=divfac)
                 et=time.time()
                 np.save(outpath+batchname+'cur_weights_list_tr_'+str(trial),cur_weights_list)
                 np.save(outpath+batchname+'teacher_weights_tr_'+str(trial),teacher_weights)    
@@ -171,7 +176,7 @@ if __name__ == "__main__":
                 np.save(outpath+batchname+'numspkslist_tr_'+str(trial),numspkslist)
                 et=time.time()
                 print('learning trial '+str(trial)+' took '+str(et-st))
-        seed=8
+
         print('seed='+str(seed))        
         test=True
         if test:
@@ -199,6 +204,7 @@ if __name__ == "__main__":
             np.save(outpath+batchname+'student_data_tr_1_'+str(num_probe_trials)+'stepsize_'+str(stepsize),num_spks_student_iters)
             np.save(outpath+batchname+'teacher_data_tr_1_'+str(num_probe_trials)+'stepsize_'+str(stepsize),num_spks_teacher_iters)
             np.save(outpath+batchname+'seedlist_tr_1_'+str(num_probe_trials)+'stepsize_'+str(stepsize),seedlist)
+            
             #compute mean responses
             if train_specs['labels_are']=='binary':
                 gen_error =np.asarray([np.mean(num_spks_student*num_spks_teacher>0) \

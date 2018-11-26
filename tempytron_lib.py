@@ -7,6 +7,10 @@ import time
 from multiprocessing import Pool
 
 #############################X pattern generation
+def increment_seed(seed):
+    seed += 1
+    np.random.seed(seed) #reserve integer-valued seeds for pattern generation
+    return seed
 def gen_spk_data(n, fr=5*1/1000., T=1000.):
     return gen_event_seq_data(np.repeat(fr*T,n), T, 'spk_idx','spk_times')
  
@@ -46,8 +50,7 @@ def get_input_pattern(feature_data,fea_count_means,num_syn,bkgd_activity_duratio
 
 def make_feature_data(seed,neu_paras,num_fea,fea_count_means,fea_labels):
     ens_para_dict={'feature_duration':50.,'avg_syn_firingrate':5*(1/1000.)} #convert to Hz to /ms
-    seed += 1
-    np.random.seed(seed) #reserve integer-valued seeds for pattern generation
+    seed=increment_seed(seed)
     fea_patterns=[gen_spk_data(neu_paras['num_syn'], ens_para_dict['avg_syn_firingrate'], ens_para_dict['feature_duration'])\
                                                                    for fea in range(num_fea)] #as a list of dataframes
     features={'data':fea_patterns,'ensemble_paras':ens_para_dict}
@@ -262,23 +265,18 @@ def get_weight_change(current_weights,error_sign,learning_rate,neuron_eligibilit
     
     return weight_change  
   
-def momentum_step(current_weight_change,prev_weight_change,momentum_factor=0.99):
-    #nonzero_weightchange=np.ones(len(current_weight_change),dtype=bool)   #adds momentum to all weights (sst)
-    nonzero_weightchange=(current_weight_change!=0)                        #only adds momentum to finite weight changes (mst)
-    current_weight_change+=momentum_factor*prev_weight_change  
-    prev_weight_change[nonzero_weightchange]=current_weight_change[nonzero_weightchange] #only update previous weight change for weights that have a finite pre-momentum weight change 
-    return current_weight_change*nonzero_weightchange,prev_weight_change                 #only update wieghts that have a finite pre-momentum weight change
-    #return current_weight_change,prev_weight_change                 #only update wieghts that have a finite pre-momentum weight change
+def momentum_step(current_weight_change,prev_weight_change,which_bool,momentum_factor=0.99):
+    current_weight_change+=momentum_factor*prev_weight_change                  #when which bool is non zero weights:
+    prev_weight_change[which_bool]=current_weight_change[which_bool]           #only update previous weight change for weights that have a finite pre-momentum weight change 
+    return current_weight_change*which_bool,prev_weight_change                 #only update wieghts that have a finite pre-momentum weight change
 
-def warmup(current_weights,trials_per_cycle,n_cycles,neu_paras,seed,train_specs,get_threshcrossing_Max_only):
+def warmup(current_weights,trials_per_cycle,n_cycles,neu_paras,seed,train_specs):
     num_syn=neu_paras['num_syn']
-    seed+=1
-    np.random.seed(seed)
+    seed=increment_seed(seed)
     if train_specs['neuron_model_is']=='sst':
-        target_rate=1
-        warmup_learning_rate=1e-5
+        target_rate=0.5
+        warmup_learning_rate=1e-3
         pattern_activity_duration=500
-
     elif train_specs['neuron_model_is']=='mst':
         target_rate=5.
         warmup_learning_rate=1e-3
@@ -295,7 +293,7 @@ def warmup(current_weights,trials_per_cycle,n_cycles,neu_paras,seed,train_specs,
             elif train_specs['neuron_model_is']=='mst':
                 desired_num_spks=np.random.poisson(lam=target_rate)
             precomputed_data=precompute_data_for_iteration(neu_paras,bkgd_df,current_weights)
-            outspk_times,vMax,tMax,jMax=get_outspk_times(bkgd_df,neu_paras,*precomputed_data,neuron_model_is=train_specs['neuron_model_is'],get_threshcrossing_Max_only=get_threshcrossing_Max_only)
+            outspk_times,vMax,tMax,jMax=get_outspk_times(bkgd_df,neu_paras,*precomputed_data,neuron_model_is=train_specs['neuron_model_is'])
             precomputed_data=[var[:jMax+1] for var in precomputed_data]
             
             num_outspks=len(outspk_times)
@@ -327,8 +325,7 @@ def warmup(current_weights,trials_per_cycle,n_cycles,neu_paras,seed,train_specs,
 def train_model(neu_paras,train_specs,initial_weight_std,n_cycles,learning_rate,seed,divfac=np.Inf,\
                 trials_per_cycle=100,pattern_activity_duration=500,do_warmup=True,
                 feature_data=None,input_data=None,use_momentum=True):
-    seed+=1
-    np.random.seed(seed)
+    seed=increment_seed(seed)
     num_syn=neu_paras['num_syn']
     current_weights=np.random.normal(scale=initial_weight_std,size=num_syn)
 
@@ -339,6 +336,7 @@ def train_model(neu_paras,train_specs,initial_weight_std,n_cycles,learning_rate,
         if train_specs['learn_from']=='teacher':
             teacher_initial_weight_std=1./np.sqrt(num_syn)
     elif train_specs['neuron_model_is']=='sst':
+        do_warmup=True
         if train_specs['learn_from']=='teacher':
             teacher_initial_weight_std=1./np.sqrt(num_syn)
         elif train_specs['learn_from']=='labeled_data':
@@ -347,25 +345,20 @@ def train_model(neu_paras,train_specs,initial_weight_std,n_cycles,learning_rate,
     else:
         exit('train_specs ill-defined')
         
-    if train_specs['learning_rule_is']=='corr_thresh' or train_specs['learning_rule_is']=='corr_top_p':
-        get_threshcrossing_Max_only=False
-        if train_specs['learning_rule_is']=='corr_thresh':
-            current_weights+=1e-2 #ensures plasticity induction threshold crossed
+    if train_specs['learning_rule_is']=='corr_thresh':
+        current_weights+=1e-2 #ensures plasticity induction threshold crossed
     elif train_specs['learning_rule_is']=='Vmax_grad':
         get_threshcrossing_Max_only=True
     print(train_specs['neuron_model_is']+' learns from '+train_specs['labels_are']+' '+train_specs['learn_from']+' using '+train_specs['learning_rule_is'])        
     if train_specs['learn_from']=='teacher':     #initialize teacher
-        seed+=1
-        np.random.seed(seed)
+        seed=increment_seed(seed)
         teacher_weights=np.random.normal(scale=teacher_initial_weight_std,size=num_syn)
-        seed+=1
-        np.random.seed(seed)
-        teacher_weights,seed=warmup(teacher_weights,trials_per_cycle,n_cycles,neu_paras,seed,train_specs,get_threshcrossing_Max_only)
+        seed=increment_seed(seed)
+        teacher_weights,seed=warmup(teacher_weights,trials_per_cycle,n_cycles,neu_paras,seed,train_specs)
         print('warmed up teacher')
     if do_warmup: #warmup (only appreciable speed-up for easy tasks/fast convergence
-        seed+=1
-        np.random.seed(seed)
-        current_weights,seed=warmup(current_weights,trials_per_cycle,n_cycles,neu_paras,seed,train_specs,get_threshcrossing_Max_only)  
+        seed=increment_seed(seed)
+        current_weights,seed=warmup(current_weights,trials_per_cycle,n_cycles,neu_paras,seed,train_specs)  
         print('warmed up learner')
 
     initial_weights_norm=np.linalg.norm(current_weights)
@@ -382,13 +375,12 @@ def train_model(neu_paras,train_specs,initial_weight_std,n_cycles,learning_rate,
     #grad_cache=np.zeros(current_weights.shape)    #for RMS prop speed-up below
     cycle = 0
 
-    seed+=1
-    np.random.seed(seed)
-    performance=0.
+    seed=increment_seed(seed)
+    performance_count=0.
     presentation_order=range(trials_per_cycle)
-    while cycle < n_cycles and performance<trials_per_cycle:     
+    while cycle < n_cycles and performance_count<trials_per_cycle:     
         st=time.time()
-        performance=0.
+        performance_count=0.
         error_sign_Store=[]
         print_flag=True
         desired_numspkslist= []
@@ -404,10 +396,10 @@ def train_model(neu_paras,train_specs,initial_weight_std,n_cycles,learning_rate,
                 elif train_specs['learn_from']=='teacher':
                     pattern_df=gen_spk_data(num_syn,T=pattern_activity_duration)
                     teacher_precomputed_data=precompute_data_for_iteration(neu_paras,pattern_df,teacher_weights)
-                    teacher_outspk_times,_,_,_=get_outspk_times(pattern_df,neu_paras,*teacher_precomputed_data,neuron_model_is=train_specs['neuron_model_is'],get_threshcrossing_Max_only=get_threshcrossing_Max_only)
+                    teacher_outspk_times,_,_,_=get_outspk_times(pattern_df,neu_paras,*teacher_precomputed_data,neuron_model_is=train_specs['neuron_model_is'])
                     desired_num_spks=len(teacher_outspk_times)   
                 precomputed_data=precompute_data_for_iteration(neu_paras,pattern_df,current_weights)
-                outspk_times,_,_,_=get_outspk_times(pattern_df,neu_paras,*precomputed_data,neuron_model_is=train_specs['neuron_model_is'],get_threshcrossing_Max_only=get_threshcrossing_Max_only)
+                outspk_times,_,_,_=get_outspk_times(pattern_df,neu_paras,*precomputed_data,neuron_model_is=train_specs['neuron_model_is'])
             elif train_specs['neuron_model_is']=='sst':
                 if train_specs['learn_from']=='labeled_data':
                     pattern_df=deepcopy(input_patterns[presentation_order[it]])
@@ -415,10 +407,10 @@ def train_model(neu_paras,train_specs,initial_weight_std,n_cycles,learning_rate,
                 elif train_specs['learn_from']=='teacher':
                     pattern_df=gen_spk_data(num_syn,T=pattern_activity_duration)
                     teacher_precomputed_data=precompute_data_for_iteration(neu_paras,pattern_df,teacher_weights)
-                    outspk_times,vMax,tMax,jMax=get_outspk_times(pattern_df,neu_paras,*teacher_precomputed_data,neuron_model_is=train_specs['neuron_model_is'],get_threshcrossing_Max_only=get_threshcrossing_Max_only)
+                    outspk_times,_,_,_=get_outspk_times(pattern_df,neu_paras,*teacher_precomputed_data,neuron_model_is=train_specs['neuron_model_is'],get_threshcrossing_Max_only=True)
                     desired_num_spks=len(outspk_times)    
                 precomputed_data=precompute_data_for_iteration(neu_paras,pattern_df,current_weights)
-                outspk_times,vMax,tMax,jMax=get_outspk_times(pattern_df,neu_paras,*precomputed_data,neuron_model_is=train_specs['neuron_model_is'],get_threshcrossing_Max_only=get_threshcrossing_Max_only)
+                outspk_times,vMax,tMax,jMax=get_outspk_times(pattern_df,neu_paras,*precomputed_data,neuron_model_is=train_specs['neuron_model_is'])
                 #pattern_df=pattern_df[:jMax+1] #reallocation too costly (factor 3 slow down), so just use indexing when sending into function
                 precomputed_data=[var[:jMax+1] for var in precomputed_data]
             num_outspks=len(outspk_times)
@@ -450,7 +442,11 @@ def train_model(neu_paras,train_specs,initial_weight_std,n_cycles,learning_rate,
                 current_weight_change=get_weight_change(current_weights,error_sign,learning_rate,neuron_eligibilities,train_specs['learning_rule_is'])
                 
                 if use_momentum:
-                    current_weight_change,previous_weight_change=momentum_step(current_weight_change,previous_weight_change)
+                    if train_specs['neuron_model_is']=='sst':
+                        which_bool=np.ones(len(current_weight_change),dtype=bool)   #adds momentum to all weights (sst)
+                    elif train_specs['neuron_model_is']=='mst':    
+                        which_bool=(current_weight_change!=0)                       #only adds momentum to finite weight changes (mst))
+                    current_weight_change,previous_weight_change=momentum_step(current_weight_change,previous_weight_change,which_bool)
                 
                 current_weights+=current_weight_change
                 assert np.isnan(current_weights).sum()==0,'a weight is nan!'
@@ -468,9 +464,9 @@ def train_model(neu_paras,train_specs,initial_weight_std,n_cycles,learning_rate,
                         print_flag=False
                     current_weights*=divfac*initial_weights_norm/current_norm
             else:
-                performance+=1
+                performance_count+=1
             error_sign_Store.append(error_sign)
-        
+            
         if train_specs['learning_rule_is']=='corr_thresh': 
             print('affected:'+str((neuron_eligibilities>1e-3).sum()))
         
@@ -484,12 +480,12 @@ def train_model(neu_paras,train_specs,initial_weight_std,n_cycles,learning_rate,
 
         #cycle, time, number of correct trials,number of undershoot trials, number of overshoot trials,weight (min,avg,max), weight norm, eligibility (min,avg,max)
         print 'c: {0:4d} {1:3.6f} {2:s} {3:4d} {4:4d} {5:3.6f} {6:3.6f} {7:3.6f} {8:3.6f} {9:3.6f} {10:3.6f} {11:3.6f}' \
-                  .format(cycle, et-st, str(int(100*performance/trials_per_cycle))+'%', \
+                  .format(cycle, et-st, str(int(100*performance_count/trials_per_cycle))+'%', \
                           np.sum(np.array(error_sign_Store)==1),np.sum(np.array(error_sign_Store)==-1),\
                           np.min(current_weights), np.mean(current_weights),np.max(current_weights), current_norm,\
                           np.min(neuron_eligibilities),np.mean(neuron_eligibilities),np.max(neuron_eligibilities))  
         if train_specs['neuron_model_is']=='mst':
-            performance=0
+            performance_count=0
         np.save('neuron_eli.npy',neu_elig_Store)
     if train_specs['learn_from']=='teacher':
         return cur_weights_list, desired_numspkslist,numspkslist,seed,teacher_weights
@@ -505,30 +501,29 @@ def get_rates(current_weights,feature_data,neu_paras,bkgd_activity_duration=2000
     for feature_df in fea_patterns_tmp:
         feature_df.spk_times+=bkgd_activity_duration/2.
         
-    seed_rates=0
+    trial=0
     num_spks_present =np.zeros((num_probe_trials,len(fea_patterns_tmp)))
     num_spks_absent  =np.zeros((num_probe_trials,len(fea_patterns_tmp)))
-    while seed_rates <num_probe_trials:
+    while trial <num_probe_trials:
         bkgd_df=gen_spk_data(num_syn, bkgd_avg_syn_firingrate, bkgd_activity_duration)
         bkgd_df.loc[bkgd_df.spk_times>bkgd_activity_duration/2.,'spk_times']+=feature_duration
          
         outspk_times_absent,vMax,tMax,jMax=get_outspk_times(bkgd_df,neu_paras,*precompute_data_for_iteration(neu_paras,bkgd_df,current_weights),neuron_model_is='mst')
                                              
-        num_spks_absent[seed_rates,:]=len(outspk_times_absent)
+        num_spks_absent[trial,:]=len(outspk_times_absent)
         
         for fit,feature in enumerate(fea_patterns_tmp):
             pattern_df=bkgd_df.append(feature,ignore_index=True).sort_values(by='spk_times').reset_index(drop=True)
             outspk_times_present,vMax,tMax,jMax=get_outspk_times(pattern_df,neu_paras,*precompute_data_for_iteration(neu_paras,pattern_df,current_weights),neuron_model_is='mst')
-            num_spks_present[seed_rates,fit] =len(outspk_times_present)
-        seed_rates+=1
+            num_spks_present[trial,fit] =len(outspk_times_present)
+        trial+=1
             
     return num_spks_present,num_spks_absent
     
-def get_learning_curve_data(path,seed,neu_paras,Tprobe=2000):
+def get_mst_learning_curve_data(path,seed,neu_paras,Tprobe=2000):
     cur_weights_list=list(np.load(path+'cur_weights_list.npy'))
     features=np.load(path+'features.npy').item()
-    seed+=1
-    np.random.seed(seed)
+    seed=increment_seed(seed)
     partial_get_rates=partial(get_rates,feature_data=features,bkgd_activity_duration=Tprobe,neu_paras=neu_paras)
     stepsize=int(len(cur_weights_list)/10)
     #run
@@ -554,10 +549,9 @@ def get_learning_curve_data(path,seed,neu_paras,Tprobe=2000):
 def get_gen_error(weights_and_idx,teacher_weights,train_specs,neu_paras,pattern_activity_duration=500.,num_probe_trials=10000,pattern_avg_syn_firingrate=5*1/1000.):
     
     current_weights=weights_and_idx[1]
-    seed=weights_and_idx[0]
-    
+    seed=weights_and_idx[0]    
     np.random.seed(seed)
-    
+    get_threshcrossing_Max_only=True if train_specs['neuron_model_is']=='sst' else False
     num_syn=len(current_weights)
     num_spks_student  =np.zeros(num_probe_trials)
     num_spks_teacher  =np.zeros(num_probe_trials)
@@ -566,19 +560,50 @@ def get_gen_error(weights_and_idx,teacher_weights,train_specs,neu_paras,pattern_
         pattern_df=gen_spk_data(num_syn, pattern_avg_syn_firingrate, pattern_activity_duration)
 
         #teacher output:
-        teacher_precomputed_data=precompute_data_for_iteration(neu_paras,pattern_df,teacher_weights)
-        teacher_outspk_times,_,_,_=get_outspk_times(pattern_df,neu_paras,*teacher_precomputed_data,neuron_model_is=train_specs['neuron_model_is'],get_threshcrossing_Max_only=True)
+        teacher_outspk_times,_,_,_=get_outspk_times(pattern_df,neu_paras,*precompute_data_for_iteration(neu_paras,pattern_df,teacher_weights),neuron_model_is=train_specs['neuron_model_is'],get_threshcrossing_Max_only=get_threshcrossing_Max_only)
         num_spks_teacher[it]=len(teacher_outspk_times)
         
         #output:
-        precomputed_data=precompute_data_for_iteration(neu_paras,pattern_df,current_weights)
-        outspk_times,_,_,_=get_outspk_times(pattern_df,neu_paras,*precomputed_data,neuron_model_is=train_specs['neuron_model_is'],get_threshcrossing_Max_only=True)
+        outspk_times,_,_,_=get_outspk_times(pattern_df,neu_paras,*precompute_data_for_iteration(neu_paras,pattern_df,current_weights),neuron_model_is=train_specs['neuron_model_is'],get_threshcrossing_Max_only=get_threshcrossing_Max_only)
         num_spks_student[it]=len(outspk_times)
         
         it+=1
                 
     return num_spks_teacher,num_spks_student 
  
+def get_rates(current_weights,feature_data,neu_paras,bkgd_activity_duration=2000.,num_probe_trials=1000,bkgd_avg_syn_firingrate=5*1/1000.):
+    num_syn=len(current_weights)
+    
+    fea_patterns_tmp=deepcopy(feature_data['data'])
+    for feature_df in fea_patterns_tmp:
+        feature_df.spk_times+=bkgd_activity_duration/2.
+        
+    num_spks_present =np.zeros((num_probe_trials,len(fea_patterns_tmp)))
+    num_spks_absent  =np.zeros((num_probe_trials,len(fea_patterns_tmp)))
+    trial=0
+    while trial <num_probe_trials:
+        bkgd_df=gen_spk_data(num_syn, bkgd_avg_syn_firingrate, bkgd_activity_duration)
+        bkgd_df.loc[bkgd_df.spk_times>bkgd_activity_duration/2.,'spk_times']+=feature_data['ensemble_paras']['feature_duration']
+        
+        #teacher
+        outspk_times_absent,_,_,_=get_outspk_times(bkgd_df,neu_paras,*precompute_data_for_iteration(neu_paras,bkgd_df,current_weights),neuron_model_is='mst')                                             
+        num_spks_absent[trial,:]=len(outspk_times_absent)
+        for fit,feature in enumerate(fea_patterns_tmp):
+            pattern_df=bkgd_df.appends(feature,ignore_index=True).sort_values(by='spk_times').reset_index(drop=True)
+            outspk_times_present,_,_,_=get_outspk_times(pattern_df,neu_paras,*precompute_data_for_iteration(neu_paras,pattern_df,current_weights),neuron_model_is='mst')
+            num_spks_present[trial,fit] =len(outspk_times_present)
+        
+        #student
+        outspk_times_absent,_,_,_=get_outspk_times(bkgd_df,neu_paras,*precompute_data_for_iteration(neu_paras,bkgd_df,current_weights),neuron_model_is='mst')                                             
+        num_spks_absent[trial,:]=len(outspk_times_absent)
+        for fit,feature in enumerate(fea_patterns_tmp):
+            pattern_df=bkgd_df.append(feature,ignore_index=True).sort_values(by='spk_times').reset_index(drop=True)
+            outspk_times_present,vMax,tMax,jMax=get_outspk_times(pattern_df,neu_paras,*precompute_data_for_iteration(neu_paras,pattern_df,current_weights),neuron_model_is='mst')
+            num_spks_present[trial,fit] =len(outspk_times_present)
+        
+        trial+=1
+ 
+    return num_spks_present,num_spks_absent
     
     
     
