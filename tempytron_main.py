@@ -32,7 +32,7 @@ if __name__ == "__main__":
     #train_specs={'neuron_model_is':'sst','labels_are':'binary','learn_from':'labeled_data','learning_rule_is':'Vmax_grad'}
 
     #2016 paper
-    #train_specs={'neuron_model_is':'mst','labels_are':'agg','learn_from':'labeled_data','learning_rule_is':'corr_top_p'}
+    train_specs={'neuron_model_is':'mst','labels_are':'agg','learn_from':'labeled_data','learning_rule_is':'corr_top_p'}
 
     #apply 2016 corr learning method to 2006 sst setting
     #train_specs={'neuron_model_is':'sst','labels_are':'binary','learn_from':'labeled_data','learning_rule_is':'corr_top_p'} 
@@ -44,8 +44,9 @@ if __name__ == "__main__":
 
    #for mst:
     train_specs={'neuron_model_is':'mst','labels_are':'binary','learn_from':'teacher','learning_rule_is':'corr_top_p'} 
+    #train_specs={'neuron_model_is':'mst','labels_are':'binary','learn_from':'teacher','learning_rule_is':'corr_thresh'} 
     
-    run_name='v1_momentum'
+    run_name='v1_momentum_normelig_Topp_work'
     ##############################################000> Run
     
     for neuron_model,learning_rule in zip(('sst','mst'),('Vmax_grad','STS_grad')):
@@ -61,7 +62,7 @@ if __name__ == "__main__":
         if train_specs['labels_are']=='binary':
             
             run_name='v2_momentum_divfac'
-            
+
             neu_paras['tau_mem']=15.
             neu_paras['tau_syn']=neu_paras['tau_mem']/4            
             pattern_activity_duration=500
@@ -72,7 +73,7 @@ if __name__ == "__main__":
                 learning_rate=8e-5
             
             
-            n_cycles=2000
+            n_cycles=100
             initial_weight_std=1e-3
             trials_per_cycle=n_patterns
             
@@ -135,16 +136,15 @@ if __name__ == "__main__":
                 seed=get_mst_learning_curve_data(outpath+batchname,seed,neu_paras)
     
     elif train_specs['learn_from']=='teacher':
-        runname='v2_rankfix'
 
         if train_specs['neuron_model_is']=='mst': 
             learning_rate=1e-5
             divfac=5
-            n_cycles=2000
+            #n_cycles=100#2000
             initial_weight_std=1./np.sqrt(neu_paras['num_syn'])
-            pattern_activity_duration=1000
+            pattern_activity_duration=500
             #fea_labels=np.array([1,2,3,4,5,0,0,0,0,0]) #hard task
-            n_cycles=1000#500#1000
+            n_cycles=300#500#1000
             #fea_labels=np.array([1,0,0,0,0,0,0,0,0,0]) #easier task
             #n_cycles=200            
         elif train_specs['neuron_model_is']=='sst':
@@ -193,7 +193,7 @@ if __name__ == "__main__":
             #partial_get_gen_error(input_data[0])
             
             #run
-            st=time.time()
+            st=time.time()  
             pool = Pool(processes=8)
             num_spks_teacher_iters,num_spks_student_iters=zip(*pool.map(partial_get_gen_error,input_data))
             pool.close()
@@ -206,10 +206,10 @@ if __name__ == "__main__":
             np.save(outpath+batchname+'seedlist_tr_1_'+str(num_probe_trials)+'stepsize_'+str(stepsize),seedlist)
             
             #compute mean responses
-            if train_specs['labels_are']=='binary':
+            if train_specs['neuron_model_is']=='sst':
                 gen_error =np.asarray([np.mean(num_spks_student*num_spks_teacher>0) \
                                       for (num_spks_teacher,num_spks_student) in zip(num_spks_teacher_iters,num_spks_student_iters)])
-            elif train_specs['labels_are']=='agg':
+            elif train_specs['neuron_model_is']=='mst':
                 gen_error =np.asarray([np.mean(np.power(num_spks_student-num_spks_teacher,2)) \
                                       for (num_spks_teacher,num_spks_student) in zip(num_spks_teacher_iters,num_spks_student_iters)])
             np.save(outpath+batchname+'gen_error_tr_1_np_'+str(num_probe_trials)+'_stepsize_'+str(stepsize), gen_error)
