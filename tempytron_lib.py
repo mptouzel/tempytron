@@ -11,6 +11,7 @@ def increment_seed(seed):
     seed += 1
     np.random.seed(seed) #reserve integer-valued seeds for pattern generation
     return seed
+
 def gen_spk_data(n, fr=5*1/1000., T=1000.):
     return gen_event_seq_data(np.repeat(fr*T,n), T, 'spk_idx','spk_times')
  
@@ -34,18 +35,20 @@ def get_input_pattern(feature_data,fea_count_means,num_syn,bkgd_activity_duratio
     
     occur_df=gen_feature_occurence_data(fea_count_means, bkgd_activity_duration)
     if not occur_df.empty:  
-        #shift spikes and append occurences
-        fac=(pattern_df.spk_times[:,np.newaxis]>occur_df.occur_times[np.newaxis,:]).sum(axis=1)
-        pattern_df.spk_times+=fac*feature_duration
+        #add gaps in the background into which occurences will be placed by shifting pattern spike times forward acorrding to the number of preceding occurences
+        pattern_df.spk_times+=(pattern_df.spk_times[:,np.newaxis]>occur_df.occur_times[np.newaxis,:]).sum(axis=1)*feature_duration #RAM bottleneck for long time series
         
+        #concatenate all occurences
         features=pd.concat([fea_patterns[occur_idx] for occur_idx in occur_df.occur_idx.values],ignore_index=True)
-        
+        #get number of spikes in each occurance
         fea_length=np.array([len(fea_pattern) for fea_pattern in fea_patterns])
+        #shift occurence spike times forward according to number of preceding occurences so that occurences fall one after the other in a block of contiguous time
         occur_df.occur_times+=feature_duration*occur_df.index.values
+        #shift occurence spike times forward by thier respective occurence time so they fall in thier respective gap
         features.spk_times+=np.repeat(occur_df.occur_times.values,fea_length[occur_df.occur_idx.values])
-
+        #with the times all correctly set, place occurences into the gaps simply by appending them and sorting by time
         pattern_df=pattern_df.append(features,ignore_index=True).sort_values(by='spk_times').reset_index(drop=True)
-        
+
     return pattern_df, occur_df
 
 def make_feature_data(seed,neu_paras,num_fea,fea_count_means,fea_labels):
@@ -126,11 +129,12 @@ def get_outspk_times(pattern_df,neu_paras,logDvec,logDsvec,sgnDvec,sgnDsvec,neur
     eta=tau_mem/tau_syn
     logeta=np.log(eta)
     taufrac=tau_mem/(1-eta)
-    inspk_times=np.append(pattern_df.spk_times.values,np.Inf)                                   #add input spike at infinity to have complete and consistent interval looping
+    inspk_times=np.append(pattern_df.spk_times.values,np.Inf)                                   #add input spike at t=infinity to have complete and consistent interval looping
     inspk_times_tau_mem=inspk_times/tau_mem
     inspk_times_tau_syn=inspk_times/tau_syn
-    logDvec_mod=deepcopy(logDvec)                                                               #modified versions contain effects of any output spikes. Used to get voltage values at input spike times
+    logDvec_mod=deepcopy(logDvec)
     sgnDvec_mod=deepcopy(sgnDvec)
+    
     #init sst paras
     vMax=-np.Inf                                                                                #n.b. actually only need if using margin (not implemented yet)
     tMax=None
@@ -171,8 +175,8 @@ def get_outspk_times(pattern_df,neu_paras,logDvec,logDsvec,sgnDvec,sgnDsvec,neur
                     tlower=outspk_time
                 
                 #update total interval contribution
-                Dvec_mod_tmp=sgnDvec_mod[j+1:]*np.exp(logDvec_mod[j+1:])+spike_term            #doesn't handle j=end case since inspike_times[j+1]=np.Inf and precompute only up to j
-                sgnDvec_mod[j+1:]=np.sign(Dvec_mod_tmp)                                        #so add them explicitly here
+                Dvec_mod_tmp=sgnDvec_mod[j+1:]*np.exp(logDvec_mod[j+1:])+spike_term            #add the spike term to the remaining Ds (note that this doesn't handle j=end case since inspike_times[j+1]=np.Inf and precompute only up to j=end)
+                sgnDvec_mod[j+1:]=np.sign(Dvec_mod_tmp)                                        
                 logDvec_mod[j+1:]=np.log(np.fabs(Dvec_mod_tmp))
                 
                 if neuron_model_is=='sst':
@@ -183,7 +187,6 @@ def get_outspk_times(pattern_df,neu_paras,logDvec,logDsvec,sgnDvec,sgnDsvec,neur
                         vMax=deepcopy(vcheck)
                         jMax=j
                         tMax=tMax_shunted if is_interior_maximum else inspk_times[j+1]
-        
     if output_voltage:  
         voltage_at_spikes = v_norm*(sgnDvec_mod*np.exp(logDvec_mod-inspk_times_tau_mem[:-1]) \
                                       - sgnDsvec*np.exp(logDsvec   -inspk_times_tau_syn[:-1]))
@@ -196,11 +199,13 @@ def get_outspk_times(pattern_df,neu_paras,logDvec,logDsvec,sgnDvec,sgnDsvec,neur
              print('Maximum attained!!!!')
     
     outvars=outspk_times,vMax,tMax,jMax#,voltage_at_spikes
+    
+    
     #if output_voltage:
        #outvars=tuple(list(outvars).append(voltage_at_spikes))
     return outvars
-  
-############0 learn
+
+############0 Training
 #@profile  
 def get_corr_inspk_eligibilities(neuron_paras,inspk_times,outspk_times,logDvec,logDsvec,sgnDvec,sgnDsvec):
     tau_mem=neuron_paras['tau_mem']
@@ -229,11 +234,11 @@ def get_corr_inspk_eligibilities(neuron_paras,inspk_times,outspk_times,logDvec,l
         reset_corr=-neuron_paras['v_norm']*neuron_paras['v_thresh']*tau_mem/2* \
               np.sum( ((tau_mem-tau_syn)/(tau_mem+tau_syn))*((~out_spk_after)/exp_out_mem) \
                     + (exp_out_mem-(2*tau_syn/(tau_mem+tau_syn))*exp_out_syn)*out_spk_after \
-                    ,axis=1)    
+                    ,axis=1)
         return kernel_corr + reset_corr  
 #@profile  
 def get_neuron_eligibilities(pattern_df,neu_paras,normed_elig=False,num_outspks=None,current_weights=None):
-    neuron_eligibilities=pattern_df.groupby('spk_idx').elig.sum()
+    neuron_eligibilities=pattern_df.groupby('spk_idx').elig.sum()#.fillna
     if normed_elig:
         #print(pattern_df.spk_idx.value_counts())
         #syn_int =pattern_df.spk_idx.value_counts()*neu_paras['v_norm']*(neu_paras['tau_mem']-neu_paras['tau_syn']) #counts are neuron-indexed
@@ -246,6 +251,7 @@ def get_neuron_eligibilities(pattern_df,neu_paras,normed_elig=False,num_outspks=
         return neuron_eligibilities,neuron_eligibilities/(syn_int*volt_int) #indexed operation
     else:
         return neuron_eligibilities
+    
 def get_weight_change(current_weights,error_sign,learning_rate,neuron_eligibilities,learning_rule_is,top_elig_fraction=0.1,plasticity_induction_threshold=1e-3,normed_elig=False): 
     if learning_rule_is=='corr_top_p': 
         eligible_subset=neuron_eligibilities.sort_values(ascending=False).index.values[:int(top_elig_fraction*len(current_weights))]
@@ -255,17 +261,21 @@ def get_weight_change(current_weights,error_sign,learning_rate,neuron_eligibilit
         tmp[neuron_eligibilities.index.values]=neuron_eligibilities.values
         eligible_subset=np.array(np.where(tmp>plasticity_induction_threshold))
         eligibility_magnitude=1.
+        #eligibility_magnitude=tmp[neuron_eligibilities.index.values]
     elif learning_rule_is=='corr_thresh' and normed_elig==True:
         eligible_subset=neuron_eligibilities.index.values
         eligibility_magnitude=neuron_eligibilities.values
-        
+    else:
+        eligible_subset=neuron_eligibilities.index.values
+        eligibility_magnitude=neuron_eligibilities.values
+    #print((neuron_eligibilities.values==np.nan).sum())
     weight_change=np.zeros(current_weights.shape)   
     weight_change[eligible_subset]=learning_rate*error_sign*eligibility_magnitude
     
     if learning_rule_is=='corr_thresh' and error_sign>0: #gutig heuristic to improve threshold-based correlation learning for sst near capacity
         epsilon=1e-2
         weight_change[~eligible_subset]=epsilon*learning_rate*error_sign*eligibility_magnitude #index must be boolean
-    
+    #print(np.where(weight_change==np.nan))
     return weight_change  
   
 def momentum_step(current_weight_change,prev_weight_change,which_bool,momentum_factor=0.99):
@@ -320,10 +330,10 @@ def warmup(current_weights,trials_per_cycle,n_cycles,neu_paras,seed,train_specs)
             it+=1
         
         #cycle, time, number of correct trials,number of undershoot trials, number of overshoot trials,weight (min,avg,max), weight norm, eligibility (min,avg,max)
-        print 'c: {0:4d} {1:3.6f} {2:3.6f} {3:3.6f} {4:3.6f} {5:3.6f} {6:3.6f} {7:3.6f}' \
+        print( 'c: {0:4d} {1:3.6f} {2:3.6f} {3:3.6f} {4:3.6f} {5:3.6f} {6:3.6f} {7:3.6f}' \
                   .format(cycle, np.mean(store_num_spks),\
                           np.min(current_weights), np.mean(current_weights),np.max(current_weights),\
-                          np.min(neuron_eligibilities),np.mean(neuron_eligibilities),np.max(neuron_eligibilities))
+                          np.min(neuron_eligibilities),np.mean(neuron_eligibilities),np.max(neuron_eligibilities)))
         print('rate:'+str(np.mean(store_num_spks)))
         if np.mean(store_num_spks)>target_rate-2:
             print('warmup took '+str(cycle)+' cycles, giving '+str(np.mean(store_num_spks))+'Hz')
@@ -346,18 +356,17 @@ def train_model(neu_paras,train_specs,initial_weight_std,n_cycles,learning_rate,
         if train_specs['learn_from']=='teacher':
             teacher_initial_weight_std=1./np.sqrt(num_syn)
     elif train_specs['neuron_model_is']=='sst':
-        do_warmup=True
         if train_specs['learn_from']=='teacher':
             teacher_initial_weight_std=1./np.sqrt(num_syn)
         elif train_specs['learn_from']=='labeled_data':
             input_patterns,target_labels=input_data
             trials_per_cycle=len(input_patterns)
+            do_warmup=False
     else:
         exit('train_specs ill-defined')
         
     if train_specs['learning_rule_is']=='corr_thresh':
         current_weights+=1e-2 #ensures plasticity induction threshold crossed
-        #do_warmup=False
     elif train_specs['learning_rule_is']=='Vmax_grad':
         get_threshcrossing_Max_only=True
     print(train_specs['neuron_model_is']+' learns from '+train_specs['labels_are']+' '+train_specs['learn_from']+' using '+train_specs['learning_rule_is'])        
@@ -365,8 +374,6 @@ def train_model(neu_paras,train_specs,initial_weight_std,n_cycles,learning_rate,
         
         seed=increment_seed(seed)
         teacher_weights=np.random.normal(scale=teacher_initial_weight_std,size=num_syn)
-        if train_specs['learning_rule_is']=='corr_thresh':
-            teacher_weights+=1e-2 #ensures plasticity induction threshold crossed
 
         seed=increment_seed(seed)
         teacher_weights,seed=warmup(teacher_weights,trials_per_cycle,n_cycles,neu_paras,seed,train_specs)
@@ -385,15 +392,15 @@ def train_model(neu_paras,train_specs,initial_weight_std,n_cycles,learning_rate,
     cur_weights_list = [deepcopy(current_weights)]
     desired_numspkslist= []
     numspkslist =[]
-    
+    #outspk_times_Store=[]
     #initialize changing loop variables
     previous_weight_change=np.zeros(current_weights.shape)
     #grad_cache=np.zeros(current_weights.shape)    #for RMS prop speed-up below
     cycle = 0
-
+    
     seed=increment_seed(seed)
     performance_count=0.
-    presentation_order=range(trials_per_cycle)
+    presentation_order=np.arange(trials_per_cycle)
     while cycle < n_cycles and performance_count<trials_per_cycle:     
         st=time.time()
         performance_count=0.
@@ -440,7 +447,7 @@ def train_model(neu_paras,train_specs,initial_weight_std,n_cycles,learning_rate,
             if error_sign:
                                 
                 #compute inspike eligibility
-                pattern_df['elig']=0
+                #pattern_df['elig']=0
                 if train_specs['learning_rule_is']=='STS_grad':
                     print('STS-gradient not implemented yet!')                        
                 elif train_specs['learning_rule_is']=='Vmax_grad':
@@ -449,23 +456,26 @@ def train_model(neu_paras,train_specs,initial_weight_std,n_cycles,learning_rate,
                 elif train_specs['learning_rule_is']=='corr_thresh' or train_specs['learning_rule_is']=='corr_top_p':                    
                     if train_specs['neuron_model_is']=='sst':
                         #pattern_df.loc[:jMax,'elig']=get_corr_inspk_eligibilities(neu_paras,pattern_df.loc[:jMax,'spk_ti1es'].values,outspk_times,*precomputed_data)#,np.zeros((len(pattern_df)-(jMax+1)))))
-                        pattern_df['elig']=np.concatenate((get_corr_inspk_eligibilities(neu_paras,pattern_df.loc[:jMax,'spk_times'].values,outspk_times,*precomputed_data),np.zeros((len(pattern_df)-(jMax+1)))))
+                        pattern_df['elig']=np.concatenate((get_corr_inspk_eligibilities(neu_paras,pattern_df.loc[:jMax,'spk_times'].values,outspk_times,*precomputed_data),np.nan*np.ones((len(pattern_df)-(jMax+1)))))
                     elif train_specs['neuron_model_is']=='mst':
                         pattern_df['elig']=get_corr_inspk_eligibilities(neu_paras,pattern_df.spk_times.values,outspk_times,*precomputed_data)
                     
                 #neuron_eligibilities=get_neuron_eligibilities(pattern_df,neu_paras)
-                normed_elig=True
-                neuron_eligibilities, normed_neuron_eligibilities=get_neuron_eligibilities(pattern_df,neu_paras,normed_elig=normed_elig, num_outspks=num_outspks,current_weights=current_weights) 
-
-                current_weight_change=get_weight_change(current_weights,error_sign,learning_rate,normed_neuron_eligibilities,train_specs['learning_rule_is'],normed_elig=normed_elig)
-                
+                normed_elig=False
+                #print(pattern_df.loc[pattern_df.elig.values==0].head())
+                neuron_eligibilities=get_neuron_eligibilities(pattern_df,neu_paras,normed_elig=normed_elig, num_outspks=num_outspks,current_weights=current_weights) 
+                #neuron_eligibilities=get_neuron_eligibilities(pattern_df,neu_paras,normed_elig=normed_elig, num_outspks=num_outspks,current_weights=current_weights) 
+                #print(len(neuron_eligibilities))
+                #print(str(np.sum(neuron_eligibilities.values==np.nan))+' '+str(len(neuron_eligibilities.values)))  #<--many are zero?
+                plasticity_induction_threshold=1e-3
+                current_weight_change=get_weight_change(current_weights,error_sign,learning_rate,neuron_eligibilities,train_specs['learning_rule_is'],normed_elig=normed_elig,plasticity_induction_threshold=plasticity_induction_threshold)
+                assert np.isnan(current_weight_change).sum()==0,'here a weight is nan!'
                 if use_momentum:
                     if train_specs['neuron_model_is']=='sst':
                         which_bool=np.ones(len(current_weight_change),dtype=bool)   #adds momentum to all weights (sst)
                     elif train_specs['neuron_model_is']=='mst':    
-                        which_bool=(current_weight_change!=0)                       #only adds momentum to finite weight changes (mst))
+                        which_bool=(current_weight_change!=0)                       #only adds momentum to finite weight changes (mst)
                     current_weight_change,previous_weight_change=momentum_step(current_weight_change,previous_weight_change,which_bool)
-                
                 current_weights+=current_weight_change
                 assert np.isnan(current_weights).sum()==0,'a weight is nan!'
 
@@ -489,7 +499,7 @@ def train_model(neu_paras,train_specs,initial_weight_std,n_cycles,learning_rate,
             print('affected:'+str((neuron_eligibilities>1e-3).sum()))
         
         neu_elig_Store.append(deepcopy(neuron_eligibilities))
-        normed_neu_elig_Store.append(deepcopy(normed_neuron_eligibilities))
+        #normed_neu_elig_Store.append(deepcopy(normed_neuron_eligibilities))
 
         cur_weights_list.append(deepcopy(current_weights))
         
@@ -499,21 +509,22 @@ def train_model(neu_paras,train_specs,initial_weight_std,n_cycles,learning_rate,
         recent_discrep=np.array(numspkslist[-trials_per_cycle:])-np.array(desired_numspkslist[-trials_per_cycle:])
 
         #cycle, time, number of correct trials,number of undershoot trials, number of overshoot trials,weight (min,avg,max), weight norm, eligibility (min,avg,max)
-        print 'c: {0:4d} {1:3.6f} {2:s} {3:4d} {4:4d} {5:3.6f} {6:3.6f} {7:3.6f} {8:3.6f} {9:3.6f} {10:3.6f} {11:3.6f}' \
+        print( 'c: {0:4d} {1:3.6f} {2:s} {3:4d} {4:4d} {5:3.6f} {6:3.6f} {7:3.6f} {8:3.6f} {9:3.6f} {10:3.6f} {11:3.6f}' \
                   .format(cycle, et-st, str(int(100*performance_count/trials_per_cycle))+'%', \
                           np.sum(np.array(error_sign_Store)==1),np.sum(np.array(error_sign_Store)==-1),\
                           np.min(current_weights), np.mean(current_weights),np.max(current_weights), current_norm,\
-                          np.min(neuron_eligibilities),np.mean(neuron_eligibilities),np.max(neuron_eligibilities))  
+                          np.min(neuron_eligibilities),np.mean(neuron_eligibilities),np.max(neuron_eligibilities)))
         if train_specs['neuron_model_is']=='mst':
             performance_count=0
     np.save('neuron_eli.npy',neu_elig_Store)
-    np.save('normed_neuron_eli.npy',normed_neu_elig_Store)
+    np.save('outspk_times.npy',outspk_times_Store)
+    #np.save('normed_neuron_eli.npy',normed_neu_elig_Store)
     if train_specs['learn_from']=='teacher':
         return cur_weights_list, desired_numspkslist,numspkslist,seed,teacher_weights
     else:
         return cur_weights_list, desired_numspkslist,numspkslist,seed
 
-################0 Analyze learning
+################0 Evaluation
 def get_rates(current_weights,feature_data,neu_paras,bkgd_activity_duration=2000.,num_probe_trials=1000,bkgd_avg_syn_firingrate=5*1/1000.):
     num_syn=len(current_weights)
     

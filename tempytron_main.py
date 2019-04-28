@@ -7,10 +7,10 @@ import os
 import time
 import sys
 from multiprocessing import Pool
-
+import importlib
 import tempytron_lib
-reload(tempytron_lib)
-from tempytron_lib import gen_neuron_paras, train_model,gen_spk_data,get_mst_learning_curve_data,make_feature_data,get_gen_error,increment_seed
+importlib.reload(tempytron_lib)
+from tempytron_lib import gen_neuron_paras, train_model,gen_spk_data,get_mst_learning_curve_data,make_feature_data,get_gen_error,increment_seed,get_input_pattern
 
 #profiling: 
 #with kernprof.py in directory, place @profile above any functions to be profiled , then run:
@@ -19,6 +19,8 @@ from tempytron_lib import gen_neuron_paras, train_model,gen_spk_data,get_mst_lea
 # python -m line_profiler tempytron_main.py.lprof > profiling_stats.txt 
 
 if __name__ == "__main__":    
+
+
 
     #input options:
 
@@ -29,10 +31,10 @@ if __name__ == "__main__":
     
     #2006 paper:
     #train_specs={'neuron_model_is':'sst','labels_are':'binary','learn_from':'labeled_data','learning_rule_is':'corr_thresh'}
-    #train_specs={'neuron_model_is':'sst','labels_are':'binary','learn_from':'labeled_data','learning_rule_is':'Vmax_grad'}
+    train_specs={'neuron_model_is':'sst','labels_are':'binary','learn_from':'labeled_data','learning_rule_is':'Vmax_grad'}
 
     #2016 paper
-    train_specs={'neuron_model_is':'mst','labels_are':'agg','learn_from':'labeled_data','learning_rule_is':'corr_top_p'}
+    #train_specs={'neuron_model_is':'mst','labels_are':'agg','learn_from':'labeled_data','learning_rule_is':'corr_top_p'}
 
     #apply 2016 corr learning method to 2006 sst setting
     #train_specs={'neuron_model_is':'sst','labels_are':'binary','learn_from':'labeled_data','learning_rule_is':'corr_top_p'} 
@@ -42,16 +44,18 @@ if __name__ == "__main__":
     #train_specs={'neuron_model_is':'sst','labels_are':'binary','learn_from':'teacher','learning_rule_is':'corr_thresh'} 
     #train_specs={'neuron_model_is':'sst','labels_are':'binary','learn_from':'teacher','learning_rule_is':'corr_top_p'} 
 
-   #for mst:
-    train_specs={'neuron_model_is':'mst','labels_are':'binary','learn_from':'teacher','learning_rule_is':'corr_top_p'} 
+    #for mst:
+    #train_specs={'neuron_model_is':'mst','labels_are':'binary','learn_from':'teacher','learning_rule_is':'corr_top_p'} 
     #train_specs={'neuron_model_is':'mst','labels_are':'binary','learn_from':'teacher','learning_rule_is':'corr_thresh'} 
-    
-    run_name='v1_momentum_normelig_Topp_work'
+        
     ##############################################000> Run
     
     for neuron_model,learning_rule in zip(('sst','mst'),('Vmax_grad','STS_grad')):
         assert (train_specs['neuron_model_is']==neuron_model if train_specs['learning_rule_is']==learning_rule else True), learning_rule+'only for'+neuron_model+'!'
-
+        
+    #TODO
+    assert not train_specs['learning_rule_is']=='STS_grad', 'STS gradient-based rules not yet implemented'
+    
     outpath='data/'
     seed=0
     
@@ -62,7 +66,8 @@ if __name__ == "__main__":
         if train_specs['labels_are']=='binary':
             
             run_name='v2_momentum_divfac'
-
+            run_name='v3_momentum_heavielig'
+            
             neu_paras['tau_mem']=15.
             neu_paras['tau_syn']=neu_paras['tau_mem']/4            
             pattern_activity_duration=500
@@ -73,7 +78,7 @@ if __name__ == "__main__":
                 learning_rate=8e-5
             
             
-            n_cycles=100
+            n_cycles=300
             initial_weight_std=1e-3
             trials_per_cycle=n_patterns
             
@@ -91,7 +96,7 @@ if __name__ == "__main__":
 
                 st=time.time()
                 cur_weights_list, desired_numspkslist,numspkslist,seed=train_model( \
-                                        neu_paras,train_specs,initial_weight_std,n_cycles,learning_rate,seed, divfac=5,input_data=input_data)
+                                        neu_paras,train_specs,initial_weight_std,n_cycles,learning_rate,seed, divfac=np.Inf,input_data=input_data)
                 et=time.time()
                 np.save(outpath+batchname+'cur_weights_list_tr_'+str(trial),cur_weights_list)
 
@@ -106,7 +111,7 @@ if __name__ == "__main__":
             runname='v4_nowarmup'
             #build data using feature labels (=0:distractor,>0:clue; non-distinct labels group features into a single clue)
             fea_labels=np.array([1,2,3,4,5,0,0,0,0,0]) #hard task
-            n_cycles=100#500#1000
+            n_cycles=500#1000
             #fea_labels=np.array([1,0,0,0,0,0,0,0,0,0]) #easier task
             #n_cycles=200
 
@@ -136,6 +141,8 @@ if __name__ == "__main__":
                 seed=get_mst_learning_curve_data(outpath+batchname,seed,neu_paras)
     
     elif train_specs['learn_from']=='teacher':
+
+        run_name='v1_momentum_normelig_Topp_work'
 
         if train_specs['neuron_model_is']=='mst': 
             learning_rate=1e-5
